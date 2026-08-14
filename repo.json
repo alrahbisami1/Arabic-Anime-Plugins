@@ -1,0 +1,8 @@
+{
+  "name": "Arabic Anime",
+  "description": "Arabic anime plugins for CloudStream (Anime3rb, WitAnime, Anime4up)",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/alrahbisami1/Arabic-Anime-Plugins/builds/plugins.json"
+  ]
+}
