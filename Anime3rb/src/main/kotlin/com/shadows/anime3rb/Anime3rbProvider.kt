@@ -140,8 +140,12 @@ class Anime3rbProvider : MainAPI() {
 
         val playerText = app.get(videoUrl, referer = data).text
 
+        // The player declares `var video_sources = [];` (empty) before the real array,
+        // so find the LAST non-empty `var video_sources = [...]` assignment.
         val json = Regex("video_sources\\s*=\\s*(\\[.*?\\]);", RegexOption.DOT_MATCHES_ALL)
-            .find(playerText)?.groupValues?.get(1)
+            .findAll(playerText)
+            .map { it.groupValues[1] }
+            .lastOrNull { it.length > 2 }
             ?: return false
 
         val sources = runCatching {
