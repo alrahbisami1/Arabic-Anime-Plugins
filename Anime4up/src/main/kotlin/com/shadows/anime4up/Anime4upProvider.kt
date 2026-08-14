@@ -132,22 +132,39 @@ class Anime4upProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = app.get(data).document
+        val seen = mutableSetOf<String>()
+        var found = false
 
+        suspend fun pushServer(url: String) {
+            if (url.isBlank() || !seen.add(url)) return
+            found = true
+            loadExtractor(url, referer = data, subtitleCallback = subtitleCallback) { extracted ->
+                callback.invoke(extracted)
+            }
+        }
+
+        // Modern layout: watch servers listed as <li data-watch="...">.
+        for (li in doc.select("ul#episode-servers li[data-watch]")) {
+            pushServer(li.attr("data-watch"))
+        }
+
+        // Modern layout: download table fallback.
+        for (tr in doc.select("div.download-list table.table tbody tr")) {
+            pushServer(tr.selectFirst("td.td-link a")?.attr("href").orEmpty())
+        }
+
+        // Legacy layout: base64 JSON in <input name="wl">.
         val wl = doc.selectFirst("input[name=\"wl\"]")?.attr("value")
         if (!wl.isNullOrBlank()) {
             val links = runCatching {
                 parseJson<WatchLinks>(wl.decodeBase64()?.utf8() ?: "")
             }.getOrNull()
             if (links != null) {
-                val sources = listOfNotNull(links.fhd, links.hd, links.sd).flatMap { it.values }
-                for (link in sources) {
-                    loadExtractor(link, referer = data, subtitleCallback = subtitleCallback) { extracted ->
-                        callback.invoke(extracted)
-                    }
-                }
+                listOfNotNull(links.fhd, links.hd, links.sd).flatMap { it.values }.forEach { pushServer(it) }
             }
         }
 
+        // Legacy layout: moshahda mirrors.
         val moshahda = doc.selectFirst("input[name=\"moshahda\"]")?.attr("value")
         if (!moshahda.isNullOrBlank()) {
             val id = moshahda.decodeBase64()?.utf8().orEmpty()
@@ -159,6 +176,7 @@ class Anime4upProvider : MainAPI() {
                     "360" to "download_n",
                     "240" to "download_l",
                 ).forEach { (quality, code) ->
+                    found = true
                     callback.invoke(
                         newExtractorLink(
                             source = this.name,
@@ -173,19 +191,11 @@ class Anime4upProvider : MainAPI() {
             }
         }
 
-        // Fallback: direct server links if the above inputs are absent.
-        if (wl.isNullOrBlank() && moshahda.isNullOrBlank()) {
-            var found = false
-            for (el in doc.select("a[data-ep-url]")) {
-                val serverUrl = el.attr("data-ep-url")
-                if (serverUrl.isBlank()) continue
-                loadExtractor(serverUrl, referer = data, subtitleCallback = subtitleCallback) { extracted ->
-                    callback.invoke(extracted)
-                }
-                found = true
-            }
-            if (!found) return false
+        // Legacy fallback: direct server links via data-ep-url.
+        for (el in doc.select("a[data-ep-url]")) {
+            pushServer(el.attr("data-ep-url"))
         }
-        return true
+
+        return found
     }
 }
