@@ -2,6 +2,7 @@ package com.shadows.anime3rb
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
@@ -156,11 +157,13 @@ class Anime3rbProvider : MainAPI() {
         for (src in sources) {
             if (src.premium == true || src.src.isNullOrBlank()) continue
             val quality = src.res?.trim()?.toIntOrNull() ?: -1
+            val isHls = src.type == "hls" || src.src.endsWith(".m3u8")
             callback.invoke(
                 newExtractorLink(
                     source = this.name,
                     name = src.label ?: "${src.res}p",
                     url = src.src,
+                    type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
                 ) {
                     this.referer = mainUrl
                     this.quality = quality
@@ -176,5 +179,6 @@ data class VideoSource(
     @JsonProperty("src") val src: String? = null,
     @JsonProperty("label") val label: String? = null,
     @JsonProperty("res") val res: String? = null,
+    @JsonProperty("type") val type: String? = null,
     @JsonProperty("premium") val premium: Boolean? = false,
 )

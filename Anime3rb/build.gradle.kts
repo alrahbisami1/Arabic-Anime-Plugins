@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "Anime3rb (أنمي عرب) - بث مباشر بجودة 1080p مجانية"
