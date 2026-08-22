@@ -43,6 +43,9 @@ subprojects {
             "Anime3rb" -> "com.shadows.anime3rb"
             "WitAnime" -> "com.shadows.witanime"
             "Anime4up" -> "com.shadows.anime4up"
+            "Animedar" -> "com.shadows.animedar"
+            "Animerco" -> "com.shadows.animerco"
+            "AnimePhoenix" -> "com.shadows.animephoenix"
             else -> "com.example"
         }
 
