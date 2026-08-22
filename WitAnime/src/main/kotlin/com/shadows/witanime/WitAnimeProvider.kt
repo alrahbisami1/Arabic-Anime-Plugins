@@ -203,10 +203,10 @@ class WitAnimeProvider : MainAPI() {
     private fun buildEpisodeList(animeSlug: String, doc: Document): List<Episode> {
         val episodes = mutableListOf<Episode>()
 
-        // Strategy 1: links containing the anime slug
+        // Strategy 1: links containing the anime slug with real URLs
         doc.select("a[href*='/episode/$animeSlug']").forEach { a ->
             val href = a.attr("href")
-            if (href.isBlank()) return@forEach
+            if (href.isBlank() || href.startsWith("javascript:")) return@forEach
             if (episodes.any { it.data == href }) return@forEach
             val text = a.text().trim()
             val epNum = extractEpNumber(href + " " + text)
@@ -219,12 +219,12 @@ class WitAnimeProvider : MainAPI() {
             return episodes.sortedBy { it.episode ?: Int.MAX_VALUE }
         }
 
-        // Strategy 2: any /episode/ link containing the slug
+        // Strategy 2: any /episode/ link with real URL containing the slug
         doc.select("a[href*='/episode/']")
             .filter { it.attr("href").contains(animeSlug, true) }
             .forEach { a ->
                 val href = a.attr("href")
-                if (href.isBlank()) return@forEach
+                if (href.isBlank() || href.startsWith("javascript:")) return@forEach
                 if (episodes.any { it.data == href }) return@forEach
                 val text = a.text().trim()
                 val epNum = extractEpNumber(href + " " + text)
@@ -237,7 +237,26 @@ class WitAnimeProvider : MainAPI() {
             return episodes.sortedBy { it.episode ?: Int.MAX_VALUE }
         }
 
-        // Strategy 3: check for episode data in script tags
+        // Strategy 3: data-* attributes on episode elements (witanime.you uses javascript:void(0)
+        // hrefs but may have data-url/data-href/data-link attributes with real episode URLs)
+        doc.select("a").filter { it.text().contains("\u0627\u0644\u062d\u0644\u0642\u0629") }.forEach { a ->
+            val dataUrl = listOf("data-url", "data-href", "data-link", "data-episode")
+                .map { a.attr(it) }
+                .firstOrNull { it.startsWith("http") }
+            if (dataUrl != null && episodes.none { it.data == dataUrl }) {
+                val text = a.text().trim()
+                val epNum = extractEpNumber(dataUrl + " " + text)
+                episodes += newEpisode(dataUrl) {
+                    name = text.ifBlank { null }
+                    episode = epNum
+                }
+            }
+        }
+        if (episodes.isNotEmpty()) {
+            return episodes.sortedBy { it.episode ?: Int.MAX_VALUE }
+        }
+
+        // Strategy 4: scan <script> tags for episode data / URLs
         doc.select("script").forEach { script ->
             val js = script.data().ifBlank { return@forEach }
             Regex(""""episode_url"\s*:\s*"(https?://[^"]+)"""")
@@ -261,7 +280,7 @@ class WitAnimeProvider : MainAPI() {
             return episodes.sortedBy { it.episode ?: Int.MAX_VALUE }
         }
 
-        // Strategy 4: construct URLs from episode count in info text
+        // Strategy 5: construct URLs from episode count in info text
         val infoText = doc.selectFirst(".anime-info, .info-list, .order, .anime-details")?.text() ?: ""
         val epCount = Regex("""\u0639\u062f\u062f\s*\u0627\u0644\u062d\u0644\u0642\u0628\u062a?\D*(\d+)""").find(infoText)
             ?.groupValues?.get(1)?.toIntOrNull()
@@ -274,6 +293,29 @@ class WitAnimeProvider : MainAPI() {
                 ) {
                     name = "\u0627\u0644\u062d\u0644\u0642\u0629 $i"
                     episode = i
+                }
+            }
+            if (episodes.isNotEmpty()) {
+                return episodes
+            }
+        }
+
+        // Strategy 6: count episode text entries on the page and construct URLs
+        val epHeaders = doc.select("a, h3, li, div, span")
+            .filter { el ->
+                val t = el.text().trim()
+                t.contains("\u0627\u0644\u062d\u0644\u0642\u0629") && extractEpNumber(t) != null
+                    && el.select("a[href*='/episode/']").isEmpty()
+            }
+        val epNumbers = epHeaders.mapNotNull { el -> extractEpNumber(el.text()) }
+            .filter { it > 0 }.distinct().sorted()
+
+        if (epNumbers.isNotEmpty()) {
+            for (epNum in epNumbers) {
+                val epUrl = "${mainUrl}episode/$animeSlug-\u0627\u0644\u062d\u0644\u0642\u0629-$epNum/"
+                episodes += newEpisode(epUrl) {
+                    name = "\u0627\u0644\u062d\u0644\u0642\u0629 $epNum"
+                    episode = epNum
                 }
             }
         }
