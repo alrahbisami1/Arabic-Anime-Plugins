@@ -3,137 +3,289 @@ package com.shadows.witanime
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class WitAnimeProvider : MainAPI() {
-    override var mainUrl = "https://witanime.onl/"
+    override var mainUrl = "https://witanime.you/"
     override var name = "WitAnime"
     override val hasMainPage = true
     override var lang = "ar"
+    override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
+
     override val mainPage = mainPageOf(
-        "latest-anime" to "آخر الأنميات المضافة",
-        "latest-episodes" to "آخر الحلقات"
+        "" to "آخر الأنميات المضافة",
+        "episode/" to "آخر الحلقات",
+        "\u0642\u0627\u0626\u0645\u0629-%D8%A7\u0644\u0627\u0646\u0645\u064A/" to "قائمة الأنمي",
     )
+
+    // ===== helpers =====
+
+    private fun Element.imgSrc(): String? {
+        val el = selectFirst("img") ?: return null
+        return el.attr("src").takeIf { it.startsWith("http") }
+            ?: el.attr("data-src").takeIf { it.startsWith("http") }
+            ?: el.attr("data-lazy-src").takeIf { it.startsWith("http") }
+    }
+
+    private fun Element.toAnimeCard(): AnimeSearchResponse? {
+        val link = selectFirst("a[href*='/anime/']")
+            ?: selectFirst("a[href]")
+            ?: return null
+        val href = link.attr("href").takeIf { it.isNotBlank() } ?: return null
+        if (!href.contains("/anime/")) return null
+        val title = selectFirst("h3, h2")?.text()
+            ?: selectFirst(".anime-title, .card-title")?.text()
+            ?: link.text().takeIf { it.isNotBlank() }
+            ?: return null
+        val poster = imgSrc()
+        val typeStr = selectFirst("a[href*='anime-type'], .type-badge")?.text()
+        return newAnimeSearchResponse(title.trim(), href, tvTypeOf(typeStr)) {
+            this.posterUrl = fixUrlNull(poster)
+        }
+    }
+
+    private fun Element.toEpisodeCard(): AnimeSearchResponse? {
+        val epLink = selectFirst("a[href*='/episode/']") ?: return null
+        val epHref = epLink.attr("href")
+        val animeLink = selectFirst("a[href*='/anime/']")
+        val animeHref = animeLink?.attr("href") ?: return null
+        val title = animeLink.text().takeIf { it.isNotBlank() }
+            ?: selectFirst("h3, h2")?.text()
+            ?: return null
+        val poster = imgSrc()
+        val epNum = Regex("""\u0627\u0644\u062d\u0644\u0642\u0629[- ]?(\d+)""")
+            .find(epHref + " " + epLink.text())?.groupValues?.get(1)?.toIntOrNull()
+        return newAnimeSearchResponse(title.trim(), animeHref, TvType.Anime) {
+            this.posterUrl = fixUrlNull(poster)
+            addDubStatus(false, epNum)
+        }
+    }
+
+    private fun tvTypeOf(type: String?): TvType = when {
+        type == null -> TvType.Anime
+        type.contains("\u0641\u064a\u0644\u0645") || type.contains("movie", true) -> TvType.AnimeMovie
+        type.contains("OVA", true) || type.contains("ONA", true) || type.contains("Special", true) -> TvType.OVA
+        else -> TvType.Anime
+    }
 
     // ===== main page =====
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val document = app.get(mainUrl).document
-        return when (request.data) {
-            "latest-episodes" -> {
-                val items = document.select(".latest-episodes .episode-card").mapNotNull { el ->
-                    el.toEpisodeCardSearch()
-                }
-                newHomePageResponse(request.name, items.distinctBy { it.url })
-            }
-            else -> {
-                val items = document.select(".anime-card").mapNotNull { el ->
-                    val href = el.selectFirst("a.image")?.attr("href")
-                        ?: return@mapNotNull null
-                    if (!href.contains("/anime/")) return@mapNotNull null
-                    val title = el.selectFirst("h3")?.text() ?: return@mapNotNull null
-                    val img = el.selectFirst("a.image")?.attr("style")
-                        ?.let { Regex("url\\('([^']+)'\\)").find(it)?.groupValues?.get(1) }
-                    val type = el.selectFirst(".anime-type")?.text()
-                    newAnimeSearchResponse(title, href, tvTypeOf(type)) {
-                        this.posterUrl = fixUrlNull(img)
-                    }
-                }
-                newHomePageResponse(request.name, items.distinctBy { it.url })
+        val url = if (page <= 1) mainUrl + request.data else {
+            val base = if (request.data.endsWith("/")) "${mainUrl}${request.data}"
+            else "${mainUrl}${request.data}"
+            "${base}page/$page/"
+        }
+        val doc = app.get(url).document
+        val items = mutableListOf<SearchResponse>()
+
+        // 1. Anime cards (e.g. pinned anime, latest anime)
+        doc.select("a[href*='/anime/']").distinctBy { it.attr("href") }.forEach { a ->
+            val card = a.closest("div") ?: a.parent() ?: return@forEach
+            val href = a.attr("href")
+            val title = card.selectFirst("h3, h2")?.text()
+                ?: a.text().takeIf { it.isNotBlank() } ?: return@forEach
+            if (title.length < 2) return@forEach
+            val poster = card.imgSrc()
+            val typeStr = card.selectFirst("a[href*='anime-type']")?.text()
+            items.add(newAnimeSearchResponse(title.trim(), href, tvTypeOf(typeStr)) {
+                this.posterUrl = fixUrlNull(poster)
+            })
+        }
+
+        // 2. Episode cards (latest episodes listing)
+        if (items.isEmpty() || request.data.contains("episode")) {
+            doc.select("a[href*='/episode/']").distinctBy { it.attr("href") }.forEach { a ->
+                val card = a.closest("div") ?: a.parent() ?: return@forEach
+                val epHref = a.attr("href")
+                val animeLink = card.selectFirst("a[href*='/anime/']") ?: return@forEach
+                val animeHref = animeLink.attr("href")
+                val title = animeLink.text().takeIf { it.isNotBlank() } ?: return@forEach
+                if (title.length < 2) return@forEach
+                val poster = card.imgSrc()
+                val epNum = Regex("""\u0627\u0644\u062d\u0644\u0642\u0629[- ]?(\d+)""")
+                    .find(epHref + " " + a.text())?.groupValues?.get(1)?.toIntOrNull()
+                items.add(newAnimeSearchResponse(title.trim(), animeHref, TvType.Anime) {
+                    this.posterUrl = fixUrlNull(poster)
+                    addDubStatus(false, epNum)
+                })
             }
         }
-    }
 
-    private fun tvTypeOf(type: String?): TvType = when (type) {
-        "فيلم" -> TvType.AnimeMovie
-        else -> TvType.Anime
-    }
-
-    private fun Element.toEpisodeCardSearch(): AnimeSearchResponse? {
-        val episodeHref = selectFirst("a.image")?.attr("href") ?: return null
-        if (!episodeHref.contains("/episode/")) return null
-        val animeHref = selectFirst("a[href*=/anime/]")?.attr("href") ?: return null
-        val title = selectFirst("h4")?.text() ?: selectFirst("h3")?.text() ?: return null
-        val img = selectFirst("a.image")?.attr("style")
-            ?.let { Regex("url\\('([^']+)'\\)").find(it)?.groupValues?.get(1) }
-        val epNum = Regex("الحلقة (\\d+)").find(selectFirst("h3")?.text().orEmpty())
-            ?.groupValues?.get(1)?.toIntOrNull()
-        return newAnimeSearchResponse(title, animeHref, TvType.Anime) {
-            this.posterUrl = fixUrlNull(img)
-            addDubStatus(false, epNum)
-        }
+        return newHomePageResponse(request.name, items.distinctBy { it.url })
     }
 
     // ===== search =====
-    // Search results show the matching anime's latest episodes as episode-cards.
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("${mainUrl}?s=$query").document
-        return document.select(".episode-card").mapNotNull { it.toEpisodeCardSearch() }
-            .distinctBy { it.url }
+        val doc = app.get("${mainUrl}?s=$query").document
+        val results = mutableListOf<SearchResponse>()
+
+        // Search results may be episode cards or anime cards
+        doc.select("a[href*='/episode/'], a[href*='/anime/']").distinctBy { it.attr("href") }.forEach { a ->
+            val card = a.closest("div") ?: a.parent() ?: return@forEach
+            val href = a.attr("href")
+            if (href.contains("/anime/")) {
+                val title = card.selectFirst("h3, h2")?.text()
+                    ?: a.text().takeIf { it.isNotBlank() } ?: return@forEach
+                if (title.length < 2) return@forEach
+                results.add(newAnimeSearchResponse(title.trim(), href, TvType.Anime) {
+                    this.posterUrl = fixUrlNull(card.imgSrc())
+                })
+            } else if (href.contains("/episode/")) {
+                val animeLink = card.selectFirst("a[href*='/anime/']") ?: return@forEach
+                val animeHref = animeLink.attr("href")
+                val title = animeLink.text().takeIf { it.isNotBlank() } ?: return@forEach
+                if (title.length < 2) return@forEach
+                val epNum = Regex("""\u0627\u0644\u062d\u0644\u0642\u0629[- ]?(\d+)""")
+                    .find(href + " " + a.text())?.groupValues?.get(1)?.toIntOrNull()
+                results.add(newAnimeSearchResponse(title.trim(), animeHref, TvType.Anime) {
+                    this.posterUrl = fixUrlNull(card.imgSrc())
+                    addDubStatus(false, epNum)
+                })
+            }
+        }
+
+        return results.distinctBy { it.url }
     }
 
     // ===== load =====
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url).document
+        val doc = app.get(url).document
 
-        val title = document.selectFirst("h1")?.text()
+        if (url.contains("/episode/")) {
+            // Find parent anime page
+            val animeUrl = doc.selectFirst("a[href*='/anime/']")?.attr("href")
+            if (animeUrl != null) return loadAnimePage(animeUrl)
+            // Fallback: create minimal episode response
+            val title = doc.selectFirst("h1, h2, .episode-anime-title")?.text() ?: "Unknown"
+            val epNum = Regex("""\u0627\u0644\u062d\u0644\u0642\u0629[- ]?(\d+)""")
+                .find(url)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+            return newAnimeLoadResponse(title, url, TvType.Anime) {
+                addEpisodes(DubStatus.Subbed, listOf(
+                    newEpisode(url) { episode = epNum; name = "\u0627\u0644\u062d\u0644\u0642\u0629 $epNum" }
+                ))
+            }
+        }
+
+        return loadAnimePage(url)
+    }
+
+    private suspend fun loadAnimePage(url: String): LoadResponse {
+        val doc = app.get(url).document
+
+        val title = doc.selectFirst("h1, .anime-title, .anime-details h1")?.text()?.trim()
             ?: throw ErrorLoadingException("No title")
 
-        val poster = document.selectFirst(".anime-card .image")?.attr("style")
-            ?.let { Regex("url\\('([^']+)'\\)").find(it)?.groupValues?.get(1) }
+        val poster = doc.selectFirst(".anime-poster img, .anime-image img, .anime-cover img")?.run {
+            attr("src").takeIf { it.startsWith("http") }
+                ?: attr("data-src").takeIf { it.startsWith("http") }
+        } ?: doc.selectFirst("img")?.attr("src")?.takeIf { it.startsWith("http") }
 
-        val plot = document.selectFirst(".media-story .content p")?.text()
+        val description = doc.selectFirst(".anime-story, .story, .anime-description, .description")?.text()?.trim()
 
-        val type = document.select(".media-info li").mapNotNull { li ->
-            li.text().takeIf { it.contains("النوع") }?.substringAfter("النوع:")
-                ?.trim()?.let { tvTypeOf(it) }
-        }.firstOrNull() ?: TvType.Anime
+        val typeStr = doc.selectFirst("a[href*='anime-type']")?.text()
+        val type = tvTypeOf(typeStr)
 
-        val episodes = getAllEpisodes(url, document)
+        val slug = url.trimEnd('/').substringAfterLast('/')
+        val episodes = buildEpisodeList(slug, doc)
 
         return newAnimeLoadResponse(title, url, type) {
             this.posterUrl = fixUrlNull(poster)
-            this.plot = plot
+            this.plot = description
             addEpisodes(DubStatus.Subbed, episodes)
         }
     }
 
-    // WitAnime paginates episodes via /page/N/. Fetch until no next page (with a sane cap).
-    private suspend fun getAllEpisodes(baseUrl: String, firstDoc: Document): List<Episode> {
+    private fun buildEpisodeList(animeSlug: String, doc: Document): List<Episode> {
         val episodes = mutableListOf<Episode>()
-        var currentDoc = firstDoc
-        var pageUrl = baseUrl
-        var guard = 0
-        while (guard++ < 60) {
-            currentDoc.select("ul.episodes-lists li").forEach { li ->
-                val href = li.selectFirst("a.image")?.attr("href")
-                    ?: li.selectFirst("a.title")?.attr("href")
-                    ?: return@forEach
-                if (!href.contains("/episode/")) return@forEach
-                if (episodes.any { it.data == href }) return@forEach
-                val epName = li.selectFirst("h3")?.text()
-                val epNum = Regex("الحلقة (\\d+)").find(epName.orEmpty())
-                    ?.groupValues?.get(1)?.toIntOrNull()
-                episodes.add(newEpisode(href) {
-                    this.name = epName
-                    this.episode = epNum
-                })
+
+        // Strategy 1: links containing the anime slug
+        doc.select("a[href*='/episode/$animeSlug']").forEach { a ->
+            val href = a.attr("href")
+            if (href.isBlank()) return@forEach
+            if (episodes.any { it.data == href }) return@forEach
+            val text = a.text().trim()
+            val epNum = extractEpNumber(href + " " + text)
+            episodes += newEpisode(href) {
+                name = text.ifBlank { null }
+                episode = epNum
             }
-            val next = currentDoc.selectFirst("a.next, a[rel=next], .pagination a[rel=next]")
-                ?: currentDoc.select("link[rel=next]").firstOrNull()
-            val nextUrl = next?.attr("href")
-            if (nextUrl.isNullOrBlank() || nextUrl == pageUrl) break
-            pageUrl = nextUrl
-            if (!pageUrl.startsWith("http")) pageUrl = fixUrl(pageUrl)
-            currentDoc = app.get(pageUrl).document
         }
+        if (episodes.isNotEmpty()) {
+            return episodes.sortedBy { it.episode ?: Int.MAX_VALUE }
+        }
+
+        // Strategy 2: any /episode/ link containing the slug
+        doc.select("a[href*='/episode/']")
+            .filter { it.attr("href").contains(animeSlug, true) }
+            .forEach { a ->
+                val href = a.attr("href")
+                if (href.isBlank()) return@forEach
+                if (episodes.any { it.data == href }) return@forEach
+                val text = a.text().trim()
+                val epNum = extractEpNumber(href + " " + text)
+                episodes += newEpisode(href) {
+                    name = text.ifBlank { null }
+                    episode = epNum
+                }
+            }
+        if (episodes.isNotEmpty()) {
+            return episodes.sortedBy { it.episode ?: Int.MAX_VALUE }
+        }
+
+        // Strategy 3: check for episode data in script tags
+        doc.select("script").forEach { script ->
+            val js = script.data().ifBlank { return@forEach }
+            Regex(""""episode_url"\s*:\s*"(https?://[^"]+)"""")
+                .findAll(js).map { it.groupValues[1] }.forEach { epUrl ->
+                    if (episodes.none { it.data == epUrl }) {
+                        val epNum = extractEpNumber(epUrl)
+                        episodes += newEpisode(epUrl) {
+                            episode = epNum
+                            name = epNum?.let { "\u0627\u0644\u062d\u0644\u0642\u0629 $it" }
+                        }
+                    }
+                }
+            Regex("""(?:episode|ep)_number["\s:]+(\d+)""", RegexOption.IGNORE_CASE)
+                .findAll(js).map { it.groupValues[1].toInt() }.forEach { epNum ->
+                    if (episodes.none { it.episode == epNum }) {
+                        episodes += newEpisode("") { episode = epNum }
+                    }
+                }
+        }
+        if (episodes.isNotEmpty()) {
+            return episodes.sortedBy { it.episode ?: Int.MAX_VALUE }
+        }
+
+        // Strategy 4: construct URLs from episode count in info text
+        val infoText = doc.selectFirst(".anime-info, .info-list, .order, .anime-details")?.text() ?: ""
+        val epCount = Regex("""\u0639\u062f\u062f\s*\u0627\u0644\u062d\u0644\u0642\u0628\u062a?\D*(\d+)""").find(infoText)
+            ?.groupValues?.get(1)?.toIntOrNull()
+            ?: Regex("""(\d+)\s*\u062d\u0644\u0642\u0629""").find(infoText)?.groupValues?.get(1)?.toIntOrNull()
+
+        if (epCount != null && epCount in 1..3000) {
+            for (i in 1..epCount) {
+                episodes += newEpisode(
+                    "${mainUrl}episode/$animeSlug-\u0627\u0644\u062d\u0644\u0642\u0629-$i/"
+                ) {
+                    name = "\u0627\u0644\u062d\u0644\u0642\u0629 $i"
+                    episode = i
+                }
+            }
+        }
+
         return episodes
     }
+
+    private fun extractEpNumber(text: String): Int? =
+        Regex("""\u0627\u0644\u062d\u0644\u0642\u0629[- ]?(\d+)""").find(text)
+            ?.groupValues?.get(1)?.toIntOrNull()
+            ?: Regex("""[Ee]p(?:isode)?[- ]?(\d+)""").find(text)
+                ?.groupValues?.get(1)?.toIntOrNull()
 
     // ===== load links =====
     override suspend fun loadLinks(
@@ -142,30 +294,75 @@ class WitAnimeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
-        val servers = document.select("a.episode-server").map { server ->
-            server.attr("data-url") to server.text()
-        }
-        if (servers.isEmpty()) return false
+        val doc = app.get(data).document
+        var found = false
 
-        for ((serverUrl, serverName) in servers) {
-            loadExtractor(serverUrl, referer = data, subtitleCallback = subtitleCallback) { link ->
-                if (link.name.isNullOrBlank()) {
-                    @Suppress("DEPRECATION", "DEPRECATION_ERROR")
-                    callback.invoke(
-                        ExtractorLink(
-                            source = serverName.ifBlank { this.name },
-                            name = serverName.ifBlank { link.name },
-                            url = link.url,
-                            referer = data,
-                            quality = link.quality,
-                        )
-                    )
-                } else {
-                    callback.invoke(link)
-                }
-            }
+        // 1. data-embed / data-src / data-url / data-link attributes on server buttons
+        doc.select("[data-embed],[data-src],[data-url],[data-link]").forEach { el ->
+            val embedUrl = listOf("data-embed", "data-src", "data-url", "data-link")
+                .map { el.attr(it) }
+                .firstOrNull { it.startsWith("http") }
+                ?: return@forEach
+            found = true
+            safeLoadExtractor(embedUrl, data, subtitleCallback, callback)
         }
-        return true
+
+        // 2. iframes already in the HTML
+        doc.select("iframe[src], iframe[data-src]").forEach { iframe ->
+            val src = iframe.attr("src").takeIf { it.startsWith("http") }
+                ?: iframe.attr("data-src").takeIf { it.startsWith("http") }
+                ?: return@forEach
+            found = true
+            safeLoadExtractor(src, data, subtitleCallback, callback)
+        }
+
+        // 3. scan <script> tags for embedded URLs and server data
+        doc.select("script").forEach { script ->
+            val js = script.data().takeIf { it.isNotBlank() } ?: return@forEach
+
+            // Pattern A: JSON-style embed URLs
+            Regex(""""(?:embed|src|url|link|file)"\s*:\s*"(https?://[^"]+)"""")
+                .findAll(js).map { it.groupValues[1] }.forEach {
+                    found = true
+                    safeLoadExtractor(it, data, subtitleCallback, callback)
+                }
+
+            // Pattern B: JS array of server objects
+            Regex("""(?:var|const|let)\s+\w+\s*=\s*(\[[\s\S]+?]);""")
+                .findAll(js).forEach { match ->
+                    try {
+                        val arr = com.lagradost.cloudstream3.utils.AppUtils.tryParseJson<List<Map<String, String>>>(match.groupValues[1])
+                        arr?.forEach inner@{ srv ->
+                            val foundUrl = srv["embed"] ?: srv["url"]
+                                ?: srv["src"] ?: srv["link"] ?: return@inner
+                            if (foundUrl.startsWith("http")) {
+                                found = true
+                                safeLoadExtractor(foundUrl, data, subtitleCallback, callback)
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+
+            // Pattern C: bare URLs that look like known embed hosts
+            Regex("""(https?://(?:ok\.ru|streamwish\.\w+|dailymotion\.com|videa\.hu|yonaplay\.\w+)/[^\s"'<>]+)""")
+                .findAll(js).map { it.groupValues[1] }.forEach {
+                    found = true
+                    safeLoadExtractor(it, data, subtitleCallback, callback)
+                }
+        }
+
+        return found
+    }
+
+    private suspend fun safeLoadExtractor(
+        url: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+    ) {
+        try {
+            loadExtractor(url, referer, subtitleCallback, callback)
+        } catch (_: Exception) {
+        }
     }
 }

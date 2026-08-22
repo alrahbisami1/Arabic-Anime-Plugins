@@ -1,12 +1,12 @@
-version = 1
+version = 2
 
 cloudstream {
-    description = "WitAnime onl"
+    description = "WitAnime you"
     authors = listOf("shadows")
 
     status = 1
 
     tvTypes = listOf("Anime", "AnimeMovie", "OVA")
     language = "ar"
-    iconUrl = "https://witanime.onl/wp-content/uploads/2026/07/WITLOGO.png"
+    iconUrl = "https://witanime.you/wp-content/uploads/2022/01/WITLOGO.png"
 }
