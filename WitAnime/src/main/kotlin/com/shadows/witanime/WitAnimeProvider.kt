@@ -1,6 +1,8 @@
 package com.shadows.witanime
 
+import android.util.Base64
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Document
@@ -15,12 +17,10 @@ class WitAnimeProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
 
     override val mainPage = mainPageOf(
-        "" to "آخر الأنميات المضافة",
-        "episode/" to "آخر الحلقات",
-        "\u0642\u0627\u0626\u0645\u0629-%D8%A7\u0644\u0627\u0646\u0645\u064A/" to "قائمة الأنمي",
+        "" to "\u0622\u062e\u0631 \u0627\u0644\u0623\u0646\u0645\u064a\u0627\u062a \u0627\u0644\u0645\u0636\u0627\u0641\u0629",
+        "episode/" to "\u0622\u062e\u0631 \u0627\u0644\u062d\u0644\u0642\u0627\u062a",
+        "\u0642\u0627\u0626\u0645\u0629-%D8%A7\u0644\u0627\u0646\u0645\u064A/" to "\u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0623\u0646\u0645\u064A",
     )
-
-    // ===== helpers =====
 
     private fun Element.imgSrc(): String? {
         val el = selectFirst("img") ?: return null
@@ -70,20 +70,28 @@ class WitAnimeProvider : MainAPI() {
         else -> TvType.Anime
     }
 
+    private fun String.base64Decode(): String? {
+        return try {
+            val cleaned = this.trim()
+            String(Base64.decode(cleaned, Base64.DEFAULT))
+        } catch (_: Exception) {
+            try {
+                String(Base64.decode(this, Base64.NO_WRAP))
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+
     // ===== main page =====
-    override suspend fun getMainPage(
-        page: Int,
-        request: MainPageRequest
-    ): HomePageResponse {
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page <= 1) mainUrl + request.data else {
-            val base = if (request.data.endsWith("/")) "${mainUrl}${request.data}"
-            else "${mainUrl}${request.data}"
+            val base = "${mainUrl}${request.data}"
             "${base}page/$page/"
         }
         val doc = app.get(url).document
         val items = mutableListOf<SearchResponse>()
 
-        // 1. Anime cards (e.g. pinned anime, latest anime)
         doc.select("a[href*='/anime/']").distinctBy { it.attr("href") }.forEach { a ->
             val card = a.closest("div") ?: a.parent() ?: return@forEach
             val href = a.attr("href")
@@ -97,7 +105,6 @@ class WitAnimeProvider : MainAPI() {
             })
         }
 
-        // 2. Episode cards (latest episodes listing)
         if (items.isEmpty() || request.data.contains("episode")) {
             doc.select("a[href*='/episode/']").distinctBy { it.attr("href") }.forEach { a ->
                 val card = a.closest("div") ?: a.parent() ?: return@forEach
@@ -124,7 +131,6 @@ class WitAnimeProvider : MainAPI() {
         val doc = app.get("${mainUrl}?s=$query").document
         val results = mutableListOf<SearchResponse>()
 
-        // Search results may be episode cards or anime cards
         doc.select("a[href*='/episode/'], a[href*='/anime/']").distinctBy { it.attr("href") }.forEach { a ->
             val card = a.closest("div") ?: a.parent() ?: return@forEach
             val href = a.attr("href")
@@ -157,10 +163,8 @@ class WitAnimeProvider : MainAPI() {
         val doc = app.get(url).document
 
         if (url.contains("/episode/")) {
-            // Find parent anime page
             val animeUrl = doc.selectFirst("a[href*='/anime/']")?.attr("href")
             if (animeUrl != null) return loadAnimePage(animeUrl)
-            // Fallback: create minimal episode response
             val title = doc.selectFirst("h1, h2, .episode-anime-title")?.text() ?: "Unknown"
             val epNum = Regex("""\u0627\u0644\u062d\u0644\u0642\u0629[- ]?(\d+)""")
                 .find(url)?.groupValues?.get(1)?.toIntOrNull() ?: 1
@@ -203,7 +207,26 @@ class WitAnimeProvider : MainAPI() {
     private fun buildEpisodeList(animeSlug: String, doc: Document): List<Episode> {
         val episodes = mutableListOf<Episode>()
 
-        // Strategy 1: links containing the anime slug with real URLs
+        // Strategy 1: openEpisode('base64') onclick attribute (witanime.you encodes URLs in onclick)
+        doc.select("[onclick*=openEpisode]").forEach { el ->
+            val onclick = el.attr("onclick")
+            val b64 = Regex("""openEpisode\(['"]([A-Za-z0-9+/=]+)['"]\)""").find(onclick)
+                ?.groupValues?.get(1) ?: return@forEach
+            val href = b64.base64Decode() ?: return@forEach
+            if (!href.startsWith("http")) return@forEach
+            if (episodes.any { it.data == href }) return@forEach
+            val text = el.text().trim()
+            val epNum = extractEpNumber(href + " " + text)
+            episodes += newEpisode(href) {
+                name = text.ifBlank { null }
+                episode = epNum
+            }
+        }
+        if (episodes.isNotEmpty()) {
+            return episodes.sortedBy { it.episode ?: Int.MAX_VALUE }
+        }
+
+        // Strategy 2: links containing the anime slug with real URLs
         doc.select("a[href*='/episode/$animeSlug']").forEach { a ->
             val href = a.attr("href")
             if (href.isBlank() || href.startsWith("javascript:")) return@forEach
@@ -219,7 +242,7 @@ class WitAnimeProvider : MainAPI() {
             return episodes.sortedBy { it.episode ?: Int.MAX_VALUE }
         }
 
-        // Strategy 2: any /episode/ link with real URL containing the slug
+        // Strategy 3: any /episode/ link with real URL containing the slug
         doc.select("a[href*='/episode/']")
             .filter { it.attr("href").contains(animeSlug, true) }
             .forEach { a ->
@@ -237,44 +260,21 @@ class WitAnimeProvider : MainAPI() {
             return episodes.sortedBy { it.episode ?: Int.MAX_VALUE }
         }
 
-        // Strategy 3: data-* attributes on episode elements (witanime.you uses javascript:void(0)
-        // hrefs but may have data-url/data-href/data-link attributes with real episode URLs)
-        doc.select("a").filter { it.text().contains("\u0627\u0644\u062d\u0644\u0642\u0629") }.forEach { a ->
+        // Strategy 4: data-* attributes on elements containing episode text
+        doc.select("a, div, li, span").filter {
+            it.attr("onclick").isBlank() && it.text().contains("\u0627\u0644\u062d\u0644\u0642\u0629")
+        }.forEach { el ->
             val dataUrl = listOf("data-url", "data-href", "data-link", "data-episode")
-                .map { a.attr(it) }
+                .map { el.attr(it) }
                 .firstOrNull { it.startsWith("http") }
             if (dataUrl != null && episodes.none { it.data == dataUrl }) {
-                val text = a.text().trim()
+                val text = el.text().trim()
                 val epNum = extractEpNumber(dataUrl + " " + text)
                 episodes += newEpisode(dataUrl) {
                     name = text.ifBlank { null }
                     episode = epNum
                 }
             }
-        }
-        if (episodes.isNotEmpty()) {
-            return episodes.sortedBy { it.episode ?: Int.MAX_VALUE }
-        }
-
-        // Strategy 4: scan <script> tags for episode data / URLs
-        doc.select("script").forEach { script ->
-            val js = script.data().ifBlank { return@forEach }
-            Regex(""""episode_url"\s*:\s*"(https?://[^"]+)"""")
-                .findAll(js).map { it.groupValues[1] }.forEach { epUrl ->
-                    if (episodes.none { it.data == epUrl }) {
-                        val epNum = extractEpNumber(epUrl)
-                        episodes += newEpisode(epUrl) {
-                            episode = epNum
-                            name = epNum?.let { "\u0627\u0644\u062d\u0644\u0642\u0629 $it" }
-                        }
-                    }
-                }
-            Regex("""(?:episode|ep)_number["\s:]+(\d+)""", RegexOption.IGNORE_CASE)
-                .findAll(js).map { it.groupValues[1].toInt() }.forEach { epNum ->
-                    if (episodes.none { it.episode == epNum }) {
-                        episodes += newEpisode("") { episode = epNum }
-                    }
-                }
         }
         if (episodes.isNotEmpty()) {
             return episodes.sortedBy { it.episode ?: Int.MAX_VALUE }
@@ -295,9 +295,7 @@ class WitAnimeProvider : MainAPI() {
                     episode = i
                 }
             }
-            if (episodes.isNotEmpty()) {
-                return episodes
-            }
+            if (episodes.isNotEmpty()) return episodes
         }
 
         // Strategy 6: count episode text entries on the page and construct URLs
@@ -306,6 +304,7 @@ class WitAnimeProvider : MainAPI() {
                 val t = el.text().trim()
                 t.contains("\u0627\u0644\u062d\u0644\u0642\u0629") && extractEpNumber(t) != null
                     && el.select("a[href*='/episode/']").isEmpty()
+                    && el.attr("onclick").isBlank()
             }
         val epNumbers = epHeaders.mapNotNull { el -> extractEpNumber(el.text()) }
             .filter { it > 0 }.distinct().sorted()
@@ -339,7 +338,60 @@ class WitAnimeProvider : MainAPI() {
         val doc = app.get(data).document
         var found = false
 
-        // 1. data-embed / data-src / data-url / data-link attributes on server buttons
+        // 1. Decode resourceRegistry / configRegistry from script tags
+        // witanime.you stores server URLs as reversed-base64 in window.resourceRegistry
+        // and uses configRegistry for a byte offset to trim from the end
+        val registries = mutableMapOf<String, String>() // serverId -> reversed-base64
+        val configMap = mutableMapOf<String, Map<String, Any>>() // serverId -> config
+
+        doc.select("script").forEach { script ->
+            val js = script.data().takeIf { it.isNotBlank() } ?: return@forEach
+
+            // Extract resourceRegistry: window.resourceRegistry = {"id": "reversedData", ...}
+            Regex("""window\.resourceRegistry\s*=\s*(\{[\s\S]*?\});""").find(js)?.let { match ->
+                tryParseJson<Map<String, String>>(match.groupValues[1])?.forEach { (k, v) ->
+                    registries[k] = v
+                }
+            }
+
+            // Extract configRegistry: window.configRegistry = {"id": {"k": "base64key", "d": [...]}, ...}
+            Regex("""window\.configRegistry\s*=\s*(\{[\s\S]*?\});""").find(js)?.let { match ->
+                try {
+                    tryParseJson<Map<String, Map<String, Any>>>(match.groupValues[1])?.forEach { (k, v) ->
+                        configMap[k] = v
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+
+        // Decode server URLs from registries
+        if (registries.isNotEmpty()) {
+            val frameworkHash = "9933" + "bd27-92ea-" + "4ee9-807d-" + "e612029d6318"
+            doc.select("[data-server-id]").forEach { el ->
+                val serverId = el.attr("data-server-id")
+                val reversed = registries[serverId] ?: return@forEach
+                try {
+                    val cleaned = reversed.replace(Regex("[^A-Za-z0-9+/=]"), "")
+                    val config = configMap[serverId]
+                    val decoded = String(Base64.decode(cleaned, Base64.DEFAULT))
+                    val offset = if (config != null) {
+                        val indexKey = String(Base64.decode(config["k"] as? String ?: "", Base64.DEFAULT))
+                        val dArray = config["d"] as? List<*>
+                        dArray?.getOrNull(indexKey.toIntOrNull() ?: 0) as? Double ?: 0.0
+                    } else 0.0
+                    val url = decoded.dropLast(offset.toInt())
+                    if (url.startsWith("http")) {
+                        val finalUrl = if (url.contains("yonaplay.net/embed.php")) {
+                            "$url&apiKey=$frameworkHash"
+                        } else url
+                        found = true
+                        safeLoadExtractor(finalUrl, data, subtitleCallback, callback)
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+
+        // 2. data-embed / data-src / data-url / data-link attributes on server buttons
         doc.select("[data-embed],[data-src],[data-url],[data-link]").forEach { el ->
             val embedUrl = listOf("data-embed", "data-src", "data-url", "data-link")
                 .map { el.attr(it) }
@@ -349,7 +401,7 @@ class WitAnimeProvider : MainAPI() {
             safeLoadExtractor(embedUrl, data, subtitleCallback, callback)
         }
 
-        // 2. iframes already in the HTML
+        // 3. iframes already in the HTML
         doc.select("iframe[src], iframe[data-src]").forEach { iframe ->
             val src = iframe.attr("src").takeIf { it.startsWith("http") }
                 ?: iframe.attr("data-src").takeIf { it.startsWith("http") }
@@ -358,22 +410,20 @@ class WitAnimeProvider : MainAPI() {
             safeLoadExtractor(src, data, subtitleCallback, callback)
         }
 
-        // 3. scan <script> tags for embedded URLs and server data
+        // 4. scan <script> tags for embedded URLs and server data
         doc.select("script").forEach { script ->
             val js = script.data().takeIf { it.isNotBlank() } ?: return@forEach
 
-            // Pattern A: JSON-style embed URLs
             Regex(""""(?:embed|src|url|link|file)"\s*:\s*"(https?://[^"]+)"""")
                 .findAll(js).map { it.groupValues[1] }.forEach {
                     found = true
                     safeLoadExtractor(it, data, subtitleCallback, callback)
                 }
 
-            // Pattern B: JS array of server objects
             Regex("""(?:var|const|let)\s+\w+\s*=\s*(\[[\s\S]+?]);""")
                 .findAll(js).forEach { match ->
                     try {
-                        val arr = com.lagradost.cloudstream3.utils.AppUtils.tryParseJson<List<Map<String, String>>>(match.groupValues[1])
+                        val arr = tryParseJson<List<Map<String, String>>>(match.groupValues[1])
                         arr?.forEach inner@{ srv ->
                             val foundUrl = srv["embed"] ?: srv["url"]
                                 ?: srv["src"] ?: srv["link"] ?: return@inner
@@ -385,8 +435,7 @@ class WitAnimeProvider : MainAPI() {
                     } catch (_: Exception) {}
                 }
 
-            // Pattern C: bare URLs that look like known embed hosts
-            Regex("""(https?://(?:ok\.ru|streamwish\.\w+|dailymotion\.com|videa\.hu|yonaplay\.\w+)/[^\s"'<>]+)""")
+            Regex("""(https?://(?:ok\.ru|streamwish\.\w+|dailymotion\.com|videa\.hu|yonaplay\.\w+|fliqcast\.\w+|filemoon\.\w+|vidhide\.\w+|ktpubs\.\w+|uqload\.\w+|soraplay\.\w+)/[^\s"'<>]+)""")
                 .findAll(js).map { it.groupValues[1] }.forEach {
                     found = true
                     safeLoadExtractor(it, data, subtitleCallback, callback)
